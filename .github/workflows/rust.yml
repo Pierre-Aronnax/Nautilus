@@ -11,14 +11,25 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build:
-
+  identity-build:
+    name: Identity Build
     runs-on: ubuntu-latest
 
     steps:
     - uses: actions/checkout@v4
-    - name: Build and Test in Workspace
+    - name: Build in Workspace
       run: |
         cd Nautilus/identity
         cargo build --verbose --all-features
-        cargo test --verbose --all-features
+
+  identity-test:
+    name: Identity Test
+    runs-on: ubuntu-latest
+    needs: identity-build # Ensure this runs after the build job
+
+    steps:
+    - uses: actions/checkout@v4
+    - name: Test with Specific Features
+      run: |
+        cd Nautilus/identity
+        cargo test --verbose --features ecdsa,ed25519,secp256k1,dilithium,kyber,falcon
