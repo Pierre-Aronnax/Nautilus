@@ -17,7 +17,7 @@ use tokio::time::timeout;
 
 #[derive(Clone)]
 pub struct TlsSession {
-    connection: TlsConnection,
+    pub connection: TlsConnection,
 }
 
 impl TlsSession {
@@ -54,6 +54,11 @@ impl TlsSession {
     pub async fn get_session_key(&self) -> Vec<u8> {
         self.connection.get_session_key().await
     }
+    pub async fn split(&self) -> (crate::connection::TlsReader, crate::connection::TlsWriter) {
+        self.connection.split().await
+    }
+    
+    
 }
 
 /// Optional: An “adaptive” approach that tries to accept first (Responder),

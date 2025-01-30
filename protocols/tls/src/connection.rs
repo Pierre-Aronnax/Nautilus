@@ -17,6 +17,50 @@ pub struct TlsConnection {
     state: Arc<Mutex<TlsState>>,
 }
 
+pub struct TlsReader {
+    inner: Arc<Mutex<TcpStream>>,
+    state: Arc<Mutex<TlsState>>,
+}
+
+impl TlsReader {
+    pub async fn receive(&mut self) -> Result<Vec<u8>, RecordError> {
+        let session_key = {
+            let st = self.state.lock().await;
+            st.session_key().to_vec()
+        };
+
+        let mut locked_stream = self.inner.lock().await;
+        let mut buf = vec![0u8; 4096];
+        let n = locked_stream.read(&mut buf).await.map_err(|_| RecordError::ReadError)?;
+
+        let mut record = TlsRecord::deserialize(&buf[..n])?;
+        let payload = record.decrypt(&session_key)?;
+        Ok(payload)
+    }
+}
+
+pub struct TlsWriter {
+    inner: Arc<Mutex<TcpStream>>,
+    state: Arc<Mutex<TlsState>>,
+}
+
+impl TlsWriter {
+    pub async fn send(&mut self, data: &[u8]) -> Result<(), RecordError> {
+        let session_key = {
+            let st = self.state.lock().await;
+            st.session_key().to_vec()
+        };
+
+        let mut record = TlsRecord::new(RecordType::ApplicationData, data.to_vec());
+        record.encrypt(&session_key)?;
+
+        let mut locked_stream = self.inner.lock().await;
+        locked_stream.write_all(&record.serialize()).await.map_err(|_| RecordError::WriteError)?;
+        Ok(())
+    }
+}
+
+
 impl TlsConnection {
     pub async fn new(
         mut raw_stream: TcpStream,
@@ -43,6 +87,21 @@ impl TlsConnection {
     pub async fn get_session_key(&self) -> Vec<u8> {
         let st = self.state.lock().await;
         st.session_key().to_vec()
+    }
+    pub async fn split(&self) -> (TlsReader, TlsWriter) {
+        let inner_clone = self.inner.clone();
+        let state_clone = self.state.clone();
+
+        let reader = TlsReader {
+            inner: inner_clone.clone(),
+            state: state_clone.clone(),
+        };
+        let writer = TlsWriter {
+            inner: inner_clone,
+            state: state_clone,
+        };
+
+        (reader, writer)
     }
 }
 

@@ -64,6 +64,7 @@ impl SymmetricEncryption for Aes256GcmEncryption {
 }
 
 // ========================= StreamEncryption Trait =========================
+
 impl StreamEncryption for Aes256GcmEncryption {
     type Error = String;
 
@@ -74,22 +75,42 @@ impl StreamEncryption for Aes256GcmEncryption {
         key: &[u8],
         nonce: &[u8],
     ) -> Result<(), Self::Error> {
-        let mut nonce = *<&[u8; 12]>::try_from(nonce).map_err(|_| "Invalid nonce length".to_string())?;
+        // Convert the nonce slice to a [u8; 12] so we can increment it
+        let mut nonce_array = *<&[u8; 12]>::try_from(nonce)
+            .map_err(|_| "Invalid nonce length (must be 12 bytes)".to_string())?;
         let cipher = Aes256Gcm::new_from_slice(key).map_err(|e| e.to_string())?;
-        let mut buffer = vec![0u8; 1024];
 
-        while let Ok(bytes_read) = input.read(&mut buffer) {
+        let mut buffer = vec![0u8; 1024];
+        loop {
+            // 1) Read up to 1024 bytes from plaintext
+            let bytes_read = input.read(&mut buffer).map_err(|e| e.to_string())?;
             if bytes_read == 0 {
+                // Reached EOF. Write a 0-length prefix to signal "done".
+                output
+                    .write_all(&(0u32.to_be_bytes()))
+                    .map_err(|e| e.to_string())?;
                 break;
             }
 
+            // 2) Encrypt this chunk with the current nonce
             let encrypted_chunk = cipher
-                .encrypt(Nonce::from_slice(&nonce), &buffer[..bytes_read])
+                .encrypt(Nonce::from_slice(&nonce_array), &buffer[..bytes_read])
                 .map_err(|e| e.to_string())?;
-            output.write_all(&encrypted_chunk).map_err(|e| e.to_string())?;
-            Self::increment_nonce(&mut nonce);
+
+            // 3) Write the length prefix, then the ciphertext
+            let chunk_len = encrypted_chunk.len() as u32;
+            output
+                .write_all(&chunk_len.to_be_bytes())
+                .map_err(|e| e.to_string())?;
+            output
+                .write_all(&encrypted_chunk)
+                .map_err(|e| e.to_string())?;
+
+            // 4) Increment the nonce for the next chunk
+            Self::increment_nonce(&mut nonce_array);
         }
 
+        // Zeroize buffers
         buffer.zeroize();
         Ok(())
     }
@@ -101,23 +122,43 @@ impl StreamEncryption for Aes256GcmEncryption {
         key: &[u8],
         nonce: &[u8],
     ) -> Result<(), Self::Error> {
-        let mut nonce = *<&[u8; 12]>::try_from(nonce).map_err(|_| "Invalid nonce length".to_string())?;
+        let mut nonce_array = *<&[u8; 12]>::try_from(nonce)
+            .map_err(|_| "Invalid nonce length (must be 12 bytes)".to_string())?;
         let cipher = Aes256Gcm::new_from_slice(key).map_err(|e| e.to_string())?;
-        let mut buffer = vec![0u8; 1024];
 
-        while let Ok(bytes_read) = input.read(&mut buffer) {
-            if bytes_read == 0 {
+        loop {
+            // 1) Read the 4-byte length prefix
+            let mut len_buf = [0u8; 4];
+            if let Err(e) = input.read_exact(&mut len_buf) {
+                // If we get EOF here, just stop.
+                if e.kind() == std::io::ErrorKind::UnexpectedEof {
+                    break;
+                }
+                return Err(e.to_string());
+            }
+
+            let chunk_len = u32::from_be_bytes(len_buf);
+            if chunk_len == 0 {
+                // A zero chunk length signals "done"
                 break;
             }
 
+            // 2) Read exactly `chunk_len` bytes of ciphertext
+            let mut enc_buf = vec![0u8; chunk_len as usize];
+            input.read_exact(&mut enc_buf).map_err(|e| e.to_string())?;
+
+            // 3) Decrypt with the current nonce
             let decrypted_chunk = cipher
-                .decrypt(Nonce::from_slice(&nonce), &buffer[..bytes_read])
+            .decrypt(Nonce::from_slice(&nonce_array), &enc_buf[..])
                 .map_err(|e| e.to_string())?;
+
+            // 4) Write the decrypted plaintext
             output.write_all(&decrypted_chunk).map_err(|e| e.to_string())?;
-            Self::increment_nonce(&mut nonce);
+
+            // 5) Increment nonce for the next chunk
+            Self::increment_nonce(&mut nonce_array);
         }
 
-        buffer.zeroize();
         Ok(())
     }
 }
