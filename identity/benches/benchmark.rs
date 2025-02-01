@@ -18,6 +18,9 @@ mod pki_benchmark {
 
     /// Benchmark for measuring throughput in terms of signing and verification operations per second.
     pub mod keypair_throughput_benchmark;
+
+    /// Benchmark for measuing Keypair exchange rates
+    pub mod keypair_exchange_benchmark;
 }
 
 // Use `criterion_main` to define the entry point for the benchmarks.
@@ -33,5 +36,8 @@ criterion::criterion_main!(
     pki_benchmark::keypair_serialization_benchmark::crypto_benchmarks,
 
     // Runs the throughput benchmark (sign/verify operations per second).
-    pki_benchmark::keypair_throughput_benchmark::crypto_benchmarks
+    pki_benchmark::keypair_throughput_benchmark::crypto_benchmarks,
+
+    // Run the Key Exchange benchmark
+    pki_benchmark::keypair_exchange_benchmark::crypto_benchmarks,
 );
