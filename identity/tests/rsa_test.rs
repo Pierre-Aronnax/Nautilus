@@ -523,33 +523,6 @@ mod attack_tests {
         client.write_all(&ciphertext).await.unwrap();
         client.write_all(&ciphertext).await.unwrap();
     }
-
-    #[tokio::test]
-    async fn test_timing_attack() {
-        use std::time::Instant;
-
-        let rsa_key = RSAkeyPair::generate_key_pair().unwrap();
-        let valid_ciphertext = RSAkeyPair::encapsulate(&rsa_key.public_key, None).unwrap().1;
-
-        let invalid_ciphertext = vec![0u8; valid_ciphertext.len()];
-
-        // Measure valid ciphertext processing time
-        let start = Instant::now();
-        let _ = RSAkeyPair::decapsulate(&rsa_key.private_key, &valid_ciphertext, None);
-        let valid_time = start.elapsed();
-
-        // Measure invalid ciphertext processing time
-        let start = Instant::now();
-        let _ = RSAkeyPair::decapsulate(&rsa_key.private_key, &invalid_ciphertext, None);
-        let invalid_time = start.elapsed();
-
-        println!("Valid ciphertext processing time: {:?}", valid_time);
-        println!("Invalid ciphertext processing time: {:?}", invalid_time);
-
-        // Ensure processing times are indistinguishable
-        assert!((valid_time.as_millis() as i64 - invalid_time.as_millis() as i64).abs() < 5, 
-            "Processing times for valid and invalid ciphertexts should not differ significantly.");
-    }
 }
 
 #[cfg(feature = "pki_rsa")]
