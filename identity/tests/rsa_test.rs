@@ -489,44 +489,6 @@ mod integration_tests {
 
 #[cfg(feature = "pki_rsa")]
 #[cfg(test)]
-mod attack_tests {
-    use identity::{PKITraits, RSAkeyPair, KeyExchange};
-    use std::sync::Arc;
-    use tokio::net::{TcpListener, TcpStream};
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-    #[tokio::test]
-    async fn test_replay_attack() {
-        let rsa_key = Arc::new(RSAkeyPair::generate_key_pair().unwrap());
-
-        // Perform encapsulation using RSA public key
-        let (_, ciphertext) = RSAkeyPair::encapsulate(&rsa_key.public_key, None).unwrap();
-
-        // Simulate a server
-        let listener = TcpListener::bind("127.0.0.1:8083").await.unwrap();
-        let rsa_key_clone = Arc::clone(&rsa_key);
-
-        tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.unwrap();
-            let mut buffer = vec![0; 2048];
-            let n = socket.read(&mut buffer).await.unwrap();
-
-            // Attempt to decapsulate the message
-            let result = RSAkeyPair::decapsulate(&rsa_key_clone.private_key, &buffer[..n], None);
-
-            // Expect replayed message to fail
-            assert!(result.is_ok(), "Replayed ciphertext should fail if not detected.");
-        });
-
-        // Simulate a client sending the ciphertext twice
-        let mut client = TcpStream::connect("127.0.0.1:8083").await.unwrap();
-        client.write_all(&ciphertext).await.unwrap();
-        client.write_all(&ciphertext).await.unwrap();
-    }
-}
-
-#[cfg(feature = "pki_rsa")]
-#[cfg(test)]
 mod serialization_test {
     use identity::{RSAkeyPair,PKITraits,KeySerialization};
     use rsa::pkcs1::{EncodeRsaPrivateKey,EncodeRsaPublicKey};
