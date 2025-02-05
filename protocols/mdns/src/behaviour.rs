@@ -15,3 +15,8 @@ pub use mdns_error::MdnsError;
 pub use mdns_service::MdnsService;
 pub use records::{MdnsRegistry, ServiceRecord, NodeRecord};
 // =================================================
+
+// ================= In Development ================
+mod back_off;
+pub use back_off::BackoffState;
+pub use mdns_service::current_timestamp;

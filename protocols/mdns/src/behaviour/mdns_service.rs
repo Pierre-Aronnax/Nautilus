@@ -1,19 +1,25 @@
 use crate::behaviour::records::{NodeRecord, ServiceRecord};
-use crate::{DnsName, DnsPacket, DnsRecord, MdnsError, MdnsRegistry, MdnsEvent};
+use crate::{DnsName, DnsPacket, DnsRecord, MdnsError, MdnsEvent, MdnsRegistry,behaviour::back_off::BackoffState};
 use socket2::{Domain, Protocol, Socket, Type};
+use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::sync::Arc;
+use tokio::sync::Mutex;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::net::UdpSocket;
 use tokio::sync::{broadcast, RwLock};
 use tokio::time::{self, Duration};
-
+use std::sync::atomic::{AtomicU64, Ordering};
 /// Represents the mDNS service, including registry management and network communication.
 pub struct MdnsService {
     socket: Arc<UdpSocket>,
     pub registry: Arc<MdnsRegistry>,
     event_sender: broadcast::Sender<MdnsEvent>,
     origin: Arc<RwLock<Option<String>>>,
-    pub default_service_type: String,  // <--- [NEW] store the default service type
+    pub default_service_type: String,
+    pub query_cache: Arc<Mutex<HashMap<String, u64>>>, // Stores last query timestamps
+    pub backoff_state: Arc<Mutex<BackoffState>>,       // Backoff control state
+    pub backoff_interval: AtomicU64,                   // Dynamic advertisement interval
 }
 
 impl MdnsService {
@@ -42,7 +48,10 @@ impl MdnsService {
             .join_multicast_v4(multicast_addr, local_addr)
             .map_err(MdnsError::NetworkError)?;
 
-        println!("(INIT) Multicast socket set up on {}:{}", multicast_addr, port);
+        println!(
+            "(INIT) Multicast socket set up on {}:{}",
+            multicast_addr, port
+        );
         Ok(udp_socket)
     }
 
@@ -62,6 +71,9 @@ impl MdnsService {
             event_sender,
             origin: Arc::new(RwLock::new(origin)),
             default_service_type: default_service_type.to_string(),
+            query_cache: Arc::new(Mutex::new(HashMap::new())),
+            backoff_state: Arc::new(Mutex::new(BackoffState::Normal)),
+            backoff_interval: AtomicU64::new(5), // Start with a 5-second interval
         });
 
         // [NEW] Register the default service for our local node:
@@ -90,8 +102,8 @@ impl MdnsService {
         let service_record = ServiceRecord {
             id: default_id.clone(),
             service_type: self.default_service_type.clone(),
-            port: 5353,             // or a relevant port
-            ttl: Some(u32::MAX),    // never expires
+            port: 5353,          // or a relevant port
+            ttl: Some(u32::MAX), // never expires
             origin: node_origin.clone(),
             priority: Some(0),
             weight: Some(0),
@@ -104,7 +116,10 @@ impl MdnsService {
         // Also ensure the node record exists and references this service
         self.link_service_to_node(&service_record).await?;
 
-        println!("(DEFAULT-SERVICE) Registered default node service: {}", default_id);
+        println!(
+            "(DEFAULT-SERVICE) Registered default node service: {}",
+            default_id
+        );
         Ok(())
     }
 
@@ -115,7 +130,7 @@ impl MdnsService {
 
     /// Registers a local ephemeral (non-default) service to the registry.
     ///
-    /// **Also** updates the node so that `NodeRecord.services` contains this service ID.
+    /// Also updates the node so that `NodeRecord.services` contains this service ID.
     pub async fn register_local_service(
         &self,
         id: String,
@@ -141,14 +156,16 @@ impl MdnsService {
         self.link_service_to_node(&service).await?;
 
         // Optionally, broadcast an event
-        let _ = self.event_sender.send(MdnsEvent::Discovered(DnsRecord::SRV {
-            name: DnsName::new(&service.id).unwrap(),
-            ttl: service.ttl.unwrap_or(120),
-            priority: service.priority.unwrap_or(0),
-            weight: service.weight.unwrap_or(0),
-            port: service.port,
-            target: DnsName::new(&service.origin).unwrap(),
-        }));
+        let _ = self
+            .event_sender
+            .send(MdnsEvent::Discovered(DnsRecord::SRV {
+                name: DnsName::new(&service.id).unwrap(),
+                ttl: service.ttl.unwrap_or(120),
+                priority: service.priority.unwrap_or(0),
+                weight: service.weight.unwrap_or(0),
+                port: service.port,
+                target: DnsName::new(&service.origin).unwrap(),
+            }));
 
         Ok(())
     }
@@ -186,7 +203,9 @@ impl MdnsService {
     pub async fn create_advertise_packet(&self) -> Result<DnsPacket, MdnsError> {
         let origin = {
             let origin_lock = self.origin.read().await;
-            origin_lock.clone().unwrap_or_else(|| "UnknownOrigin.local".to_string())
+            origin_lock
+                .clone()
+                .unwrap_or_else(|| "UnknownOrigin.local".to_string())
         };
 
         let services = self.registry.list_services_by_node(&origin).await;
@@ -257,13 +276,17 @@ impl MdnsService {
             if let Err(err) = self.send_packet(&packet).await {
                 eprintln!("(QUERY) Failed to send periodic query: {:?}", err);
             } else {
-                println!("(QUERY) Periodic query sent for service type: {}", service_type);
+                println!(
+                    "(QUERY) Periodic query sent for service type: {}",
+                    service_type
+                );
             }
         }
     }
 
     /// Advertises all local services (including the default service) as unsolicited mDNS responses.
-    pub async fn advertise_services(&self) -> Result<(), MdnsError> {
+    #[deprecated]
+    pub async fn old_advertise_services(&self) -> Result<(), MdnsError> {
         let packet = self.create_advertise_packet().await?;
         if packet.answers.is_empty() {
             println!("(ADVERTISE) No answers in the mDNS packet.");
@@ -276,6 +299,47 @@ impl MdnsService {
         self.send_packet(&packet).await
     }
 
+    /// Starts adaptive advertisement with exponential backoff.
+    pub async fn advertise_services(self: Arc<Self>) -> Result<(), MdnsError> {
+        tokio::spawn(async move {
+            loop {
+                {
+                    let state = self.backoff_state.lock().await.clone();
+                    let current_interval = self.backoff_interval.load(Ordering::Relaxed);
+    
+                    println!(
+                        "(ADVERTISE) Current state: {:?}, Interval: {}s",
+                        state, current_interval
+                    );
+                }
+    
+                if let Ok(packet) = self.create_advertise_packet().await {
+                    if !packet.answers.is_empty() {
+                        if let Err(err) = self.send_packet(&packet).await {
+                            eprintln!("(ADVERTISE) Failed to send: {:?}", err);
+                            return Err::<(), MdnsError>(err);// 🔹 Return error properly
+                        } else {
+                            println!("(ADVERTISE) Sent mDNS advertisement.");
+                        }
+                    }
+                } else {
+                    eprintln!("(ADVERTISE) Failed to create packet.");
+                    return Err(MdnsError::Generic("Failed to create mDNS packet".to_string()));
+                }
+    
+                // Adjust backoff state dynamically
+                self.adjust_backoff_state().await;
+    
+                tokio::time::sleep(Duration::from_secs(
+                    self.backoff_interval.load(Ordering::Relaxed)
+                ))
+                .await;
+            }
+        });
+    
+        Ok(())
+    }
+    
     /// Core loop listening for incoming mDNS packets and processing them.
     pub async fn listen(&self) -> Result<(), MdnsError> {
         let mut buf = [0; 4096];
@@ -307,44 +371,61 @@ impl MdnsService {
             println!("(NODE REGISTRY) Nodes: {:?}", nodes);
         }
     }
+    pub async fn adjust_backoff_state(&self) {
+        let state = self.backoff_state.lock().await;
+        let current_interval = self.backoff_interval.load(Ordering::Relaxed);
 
+        match *state {
+            BackoffState::Normal => {
+                self.backoff_interval.store(5, Ordering::Relaxed); // Default interval
+            }
+            BackoffState::Backoff => {
+                let new_interval = (current_interval as f64 * 1.5).min(60.0) as u64;
+                self.backoff_interval.store(new_interval, Ordering::Relaxed);
+            }
+            BackoffState::Recovery => {
+                let new_interval = (current_interval as f64 / 1.5).max(5.0) as u64;
+                self.backoff_interval.store(new_interval, Ordering::Relaxed);
+            }
+            BackoffState::Stable => {
+                self.backoff_interval.store(10, Ordering::Relaxed);
+            }
+        }
+        
+        println!(
+            "(BACKOFF) Adjusted state: {:?}, New interval: {}s",
+            *state, current_interval
+        );
+    }
     /// Spawns tasks: (1) periodically advertise, (2) periodically query, (3) listen, (4) debug-print.
     pub async fn run(
         self: &Arc<Self>,
         query_service_type: String,
         query_interval: u64,
-        advertise_interval: u64,
     ) {
         let advertise_service = Arc::clone(self);
         let query_service = Arc::clone(self);
         let listen_service = Arc::clone(self);
         let registry_service = Arc::clone(self);
-
-        // Periodic advertisement
-        tokio::spawn(async move {
-            loop {
-                time::sleep(Duration::from_secs(advertise_interval)).await;
-                if let Err(err) = advertise_service.advertise_services().await {
-                    eprintln!("(ADVERTISE) Error: {:?}", err);
-                }
-            }
-        });
-
+    
+        // Start adaptive advertisement in a background task
+        tokio::spawn(advertise_service.clone().advertise_services());
+    
         // Periodic query for a specific service type (e.g. "_myservice._http._tcp.local.")
         tokio::spawn(async move {
             query_service
                 .periodic_query(&query_service_type, query_interval)
                 .await;
         });
-
+    
         // Listen loop
         tokio::spawn(async move {
             if let Err(err) = listen_service.listen().await {
                 eprintln!("(LISTEN) Error: {:?}", err);
             }
         });
-
-        // Print registry
+    
+        // Print registry periodically
         tokio::spawn(async move {
             registry_service.print_node_registry().await;
         });
@@ -369,14 +450,21 @@ impl MdnsService {
                         );
 
                         // Add/Update node
-                        if let Err(e) =
-                            self.add_node_to_registry(&name.to_string(), &src_addr.ip().to_string(), Some(*ttl)).await
+                        if let Err(e) = self
+                            .add_node_to_registry(
+                                &name.to_string(),
+                                &src_addr.ip().to_string(),
+                                Some(*ttl),
+                            )
+                            .await
                         {
                             eprintln!("(DISCOVERY) Failed to add node: {:?}", e);
                         }
 
                         // Send an event
-                        let _ = self.event_sender.send(MdnsEvent::Discovered(answer.clone()));
+                        let _ = self
+                            .event_sender
+                            .send(MdnsEvent::Discovered(answer.clone()));
                     }
 
                     // [NEW] If there's an SRV record => we discover a node's service
@@ -421,7 +509,9 @@ impl MdnsService {
                         }
 
                         // Optional event
-                        let _ = self.event_sender.send(MdnsEvent::Discovered(answer.clone()));
+                        let _ = self
+                            .event_sender
+                            .send(MdnsEvent::Discovered(answer.clone()));
                     }
 
                     // Others (e.g. PTR, AAAA, etc.)
@@ -436,13 +526,30 @@ impl MdnsService {
     }
 
     /// Process a query packet: see if we have a matching service type, respond accordingly.
-    async fn process_query(&self, packet: &DnsPacket, src: &SocketAddr) {
+    pub async fn process_query(&self, packet: &DnsPacket, src: &SocketAddr) {
+        let mut cache = self.query_cache.lock().await;
+        let now = current_timestamp();
+
         for question in &packet.questions {
             if question.qtype == 12 && question.qclass == 1 {
                 let requested_service = question.qname.labels.join(".");
-                let all_services = self.registry.list_services().await;
+
+                // **Debounce check: Ignore duplicate queries received within 500ms**
+                if let Some(last_time) = cache.get(&requested_service) {
+                    if now - *last_time < 500 {
+                        println!(
+                            "(DEBOUNCE) Ignoring duplicate query for {}",
+                            requested_service
+                        );
+                        continue;
+                    }
+                }
+
+                // Update query timestamp
+                cache.insert(requested_service.clone(), now);
 
                 println!("Requested Service : {}", requested_service);
+                let all_services = self.registry.list_services().await;
 
                 // Find all services whose `id` ends with the requested service
                 let matching_services: Vec<_> = all_services
@@ -494,10 +601,22 @@ impl MdnsService {
                     }
                 }
 
-                // Send the response
-                if let Err(err) = self.send_packet(&response_packet).await {
-                    eprintln!("(QUERY->RESP) Failed to send response: {:?}", err);
-                }
+                // **Introduce a slight delay (200ms) to batch responses**
+                let response_clone = response_packet.clone();
+                let _self_arc = Arc::new(self); // Clone `self` properly
+                let socket = Arc::clone(&self.socket); // Clone socket reference for async task
+                let multicast_addr =
+                    SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(224, 0, 0, 251), 5353));
+
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                    if let Err(err) = socket
+                        .send_to(&response_clone.serialize(), multicast_addr)
+                        .await
+                    {
+                        eprintln!("(QUERY->RESP) Failed to send response: {:?}", err);
+                    }
+                });
             }
         }
     }
@@ -515,7 +634,10 @@ impl MdnsService {
         let mut nodes = self.registry.list_nodes().await;
 
         // If there's a conflict
-        if let Some(conflict) = nodes.iter().find(|n| n.ip_address == ip_address && n.id != normalized_id) {
+        if let Some(conflict) = nodes
+            .iter()
+            .find(|n| n.ip_address == ip_address && n.id != normalized_id)
+        {
             return Err(MdnsError::Generic(format!(
                 "IP conflict: {} is already assigned to {}",
                 ip_address, conflict.id
@@ -535,7 +657,10 @@ impl MdnsService {
             }
         } else {
             // Create new node
-            println!("(DISCOVERY) Adding new node: {} with IP {}", normalized_id, ip_address);
+            println!(
+                "(DISCOVERY) Adding new node: {} with IP {}",
+                normalized_id, ip_address
+            );
 
             let new_node = NodeRecord {
                 id: normalized_id.clone(),
@@ -576,8 +701,16 @@ fn extract_service_type(srv_id: &str) -> String {
     if let Some(pos) = srv_id.find("._") {
         // return everything from that '.' onward
         // e.g. "._myDefault._tcp.local."
-        return srv_id[pos+1..].to_string(); 
+        return srv_id[pos + 1..].to_string();
     }
     // fallback
     srv_id.to_string()
+}
+
+/// Helper function to get current timestamp in milliseconds
+pub fn current_timestamp() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("Time went backwards")
+        .as_millis() as u64
 }

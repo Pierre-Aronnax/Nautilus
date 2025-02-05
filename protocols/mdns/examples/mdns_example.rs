@@ -36,7 +36,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // - Query for "_myservice._http._tcp.local." every 5 seconds.
         // - Advertise the service every 10 seconds.
         mdns_clone
-            .run("_myservice._http._tcp.local.".to_string(), 5, 10)
+            .run("_myservice._http._tcp.local.".to_string(), 5)
             .await;
     });
 
