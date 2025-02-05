@@ -17,9 +17,10 @@ pub struct MdnsService {
     event_sender: broadcast::Sender<MdnsEvent>,
     origin: Arc<RwLock<Option<String>>>,
     pub default_service_type: String,
-    pub query_cache: Arc<Mutex<HashMap<String, u64>>>, // Stores last query timestamps
-    pub backoff_state: Arc<Mutex<BackoffState>>,       // Backoff control state
-    pub backoff_interval: AtomicU64,                   // Dynamic advertisement interval
+    pub query_cache: Arc<Mutex<HashMap<String, u64>>>, 
+    pub backoff_state: Arc<Mutex<BackoffState>>,       
+    pub backoff_interval_advertise: AtomicU64,  // 🔹 Separate advertise interval
+    pub backoff_interval_query: AtomicU64,      // 🔹 Separate query interval
 }
 
 impl MdnsService {
@@ -73,7 +74,8 @@ impl MdnsService {
             default_service_type: default_service_type.to_string(),
             query_cache: Arc::new(Mutex::new(HashMap::new())),
             backoff_state: Arc::new(Mutex::new(BackoffState::Normal)),
-            backoff_interval: AtomicU64::new(5), // Start with a 5-second interval
+            backoff_interval_advertise: AtomicU64::new(5), // Start with a 5-second interval
+            backoff_interval_query: AtomicU64::new(5), // Start with a 5-second interval
         });
 
         // [NEW] Register the default service for our local node:
@@ -261,10 +263,10 @@ impl MdnsService {
     }
 
     /// Periodically sends a PTR query for the given service type.
-    pub async fn periodic_query(&self, service_type: &str, interval_secs: u64) {
-        let mut ticker = time::interval(Duration::from_secs(interval_secs));
+    pub async fn periodic_query(&self, service_type: &str) {
         loop {
-            ticker.tick().await;
+            let current_query_interval = self.backoff_interval_query.load(Ordering::Relaxed);
+    
             let mut packet = DnsPacket::new();
             packet.flags = 0x0000;
             packet.questions.push(crate::DnsQuestion {
@@ -272,15 +274,20 @@ impl MdnsService {
                 qtype: 12, // PTR
                 qclass: 1,
             });
-
+    
             if let Err(err) = self.send_packet(&packet).await {
                 eprintln!("(QUERY) Failed to send periodic query: {:?}", err);
             } else {
                 println!(
-                    "(QUERY) Periodic query sent for service type: {}",
-                    service_type
+                    "(QUERY) Periodic query sent for service type: {} (interval: {}s)",
+                    service_type, current_query_interval
                 );
             }
+    
+            // Adjust backoff state dynamically
+            self.adjust_backoff_state().await;
+    
+            tokio::time::sleep(Duration::from_secs(current_query_interval)).await;
         }
     }
 
@@ -305,19 +312,19 @@ impl MdnsService {
             loop {
                 {
                     let state = self.backoff_state.lock().await.clone();
-                    let current_interval = self.backoff_interval.load(Ordering::Relaxed);
-    
+                    let current_interval = self.backoff_interval_advertise.load(Ordering::Relaxed);
+        
                     println!(
                         "(ADVERTISE) Current state: {:?}, Interval: {}s",
                         state, current_interval
                     );
                 }
-    
+        
                 if let Ok(packet) = self.create_advertise_packet().await {
                     if !packet.answers.is_empty() {
                         if let Err(err) = self.send_packet(&packet).await {
                             eprintln!("(ADVERTISE) Failed to send: {:?}", err);
-                            return Err::<(), MdnsError>(err);// 🔹 Return error properly
+                            return Err::<(), MdnsError>(err);
                         } else {
                             println!("(ADVERTISE) Sent mDNS advertisement.");
                         }
@@ -326,12 +333,12 @@ impl MdnsService {
                     eprintln!("(ADVERTISE) Failed to create packet.");
                     return Err(MdnsError::Generic("Failed to create mDNS packet".to_string()));
                 }
-    
+        
                 // Adjust backoff state dynamically
                 self.adjust_backoff_state().await;
-    
+        
                 tokio::time::sleep(Duration::from_secs(
-                    self.backoff_interval.load(Ordering::Relaxed)
+                    self.backoff_interval_advertise.load(Ordering::Relaxed)
                 ))
                 .await;
             }
@@ -373,35 +380,49 @@ impl MdnsService {
     }
     pub async fn adjust_backoff_state(&self) {
         let state = self.backoff_state.lock().await;
-        let current_interval = self.backoff_interval.load(Ordering::Relaxed);
-
+        let current_advertise_interval = self.backoff_interval_advertise.load(Ordering::Relaxed);
+        let current_query_interval = self.backoff_interval_query.load(Ordering::Relaxed);
+    
         match *state {
             BackoffState::Normal => {
-                self.backoff_interval.store(5, Ordering::Relaxed); // Default interval
+                self.backoff_interval_advertise.store(5, Ordering::Relaxed); // Default interval
+                self.backoff_interval_query.store(5, Ordering::Relaxed);
             }
             BackoffState::Backoff => {
-                let new_interval = (current_interval as f64 * 1.5).min(60.0) as u64;
-                self.backoff_interval.store(new_interval, Ordering::Relaxed);
+                let new_advertise_interval = (current_advertise_interval as f64 * 1.5).min(60.0) as u64;
+                let new_query_interval = (current_query_interval as f64 * 1.5).min(60.0) as u64;
+                self.backoff_interval_advertise.store(new_advertise_interval, Ordering::Relaxed);
+                self.backoff_interval_query.store(new_query_interval, Ordering::Relaxed);
             }
             BackoffState::Recovery => {
-                let new_interval = (current_interval as f64 / 1.5).max(5.0) as u64;
-                self.backoff_interval.store(new_interval, Ordering::Relaxed);
+                let new_advertise_interval = (current_advertise_interval as f64 / 1.5).max(5.0) as u64;
+                let new_query_interval = (current_query_interval as f64 / 1.5).max(5.0) as u64;
+                self.backoff_interval_advertise.store(new_advertise_interval, Ordering::Relaxed);
+                self.backoff_interval_query.store(new_query_interval, Ordering::Relaxed);
             }
             BackoffState::Stable => {
-                self.backoff_interval.store(10, Ordering::Relaxed);
+                self.backoff_interval_advertise.store(10, Ordering::Relaxed);
+                self.backoff_interval_query.store(10, Ordering::Relaxed);
             }
         }
-        
+    
+        // 🔹 Ensure query interval never exceeds 2× advertise interval
+        let adjusted_query_interval = self.backoff_interval_query.load(Ordering::Relaxed);
+        let adjusted_advertise_interval = self.backoff_interval_advertise.load(Ordering::Relaxed);
+    
+        if adjusted_query_interval > 2 * adjusted_advertise_interval {
+            self.backoff_interval_query.store(2 * adjusted_advertise_interval, Ordering::Relaxed);
+        }
+    
         println!(
-            "(BACKOFF) Adjusted state: {:?}, New interval: {}s",
-            *state, current_interval
+            "(BACKOFF) Adjusted state: {:?}, New advertise interval: {}s, New query interval: {}s",
+            *state, adjusted_advertise_interval, adjusted_query_interval
         );
     }
     /// Spawns tasks: (1) periodically advertise, (2) periodically query, (3) listen, (4) debug-print.
     pub async fn run(
         self: &Arc<Self>,
         query_service_type: String,
-        query_interval: u64,
     ) {
         let advertise_service = Arc::clone(self);
         let query_service = Arc::clone(self);
@@ -411,10 +432,10 @@ impl MdnsService {
         // Start adaptive advertisement in a background task
         tokio::spawn(advertise_service.clone().advertise_services());
     
-        // Periodic query for a specific service type (e.g. "_myservice._http._tcp.local.")
+        // Adaptive Periodic Query
         tokio::spawn(async move {
             query_service
-                .periodic_query(&query_service_type, query_interval)
+                .periodic_query(&query_service_type)
                 .await;
         });
     
