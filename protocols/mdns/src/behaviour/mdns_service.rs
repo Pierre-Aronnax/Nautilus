@@ -13,7 +13,7 @@ pub struct MdnsService {
     pub registry: Arc<MdnsRegistry>,
     event_sender: broadcast::Sender<MdnsEvent>,
     origin: Arc<RwLock<Option<String>>>,
-    default_service_type: String,  // <--- [NEW] store the default service type
+    pub default_service_type: String,  // <--- [NEW] store the default service type
 }
 
 impl MdnsService {
@@ -71,7 +71,7 @@ impl MdnsService {
     }
 
     /// Registers the *compulsory* "default" service for this node.
-    async fn register_default_node_service(&self) -> Result<(), MdnsError> {
+    pub async fn register_default_node_service(&self) -> Result<(), MdnsError> {
         let node_origin = {
             let origin_lock = self.origin.read().await;
             origin_lock
@@ -351,7 +351,7 @@ impl MdnsService {
     }
 
     /// Process a response packet: see if it has A/SRV records, update registry accordingly.
-    async fn process_response(&self, packet: &DnsPacket, src: &SocketAddr) {
+    pub async fn process_response(&self, packet: &DnsPacket, src: &SocketAddr) {
         println!("Packet : {:?}", packet);
 
         // If it's IPv4
