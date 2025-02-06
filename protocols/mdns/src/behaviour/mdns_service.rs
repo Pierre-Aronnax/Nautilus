@@ -1,5 +1,9 @@
+// protocols\mdns\src\behaviour\mdns_service.rs
 use crate::behaviour::records::{NodeRecord, ServiceRecord};
-use crate::{DnsName, DnsPacket, DnsRecord, MdnsError, MdnsEvent, MdnsRegistry,behaviour::back_off::BackoffState};
+use crate::{
+    DnsName, DnsPacket, DnsRecord, MdnsError, MdnsEvent, MdnsRegistry,
+    behaviour::back_off::BackoffState,
+};
 use socket2::{Domain, Protocol, Socket, Type};
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
@@ -10,28 +14,39 @@ use tokio::net::UdpSocket;
 use tokio::sync::{broadcast, RwLock};
 use tokio::time::{self, Duration};
 use std::sync::atomic::{AtomicU64, Ordering};
-/// Represents the mDNS service, including registry management and network communication.
+
+/// ===========================
+/// MdnsService: Represents the mDNS service,
+/// handling registry management and network communication.
+/// ===========================
 pub struct MdnsService {
     socket: Arc<UdpSocket>,
     pub registry: Arc<MdnsRegistry>,
     event_sender: broadcast::Sender<MdnsEvent>,
     origin: Arc<RwLock<Option<String>>>,
     pub default_service_type: String,
-    pub query_cache: Arc<Mutex<HashMap<String, u64>>>, 
-    pub backoff_state: Arc<Mutex<BackoffState>>,       
-    pub backoff_interval_advertise: AtomicU64,  // 🔹 Separate advertise interval
-    pub backoff_interval_query: AtomicU64,      // 🔹 Separate query interval
+    pub query_cache: Arc<Mutex<HashMap<String, u64>>>,
+    pub backoff_state: Arc<Mutex<BackoffState>>,
+    pub backoff_interval_advertise: AtomicU64,
+    pub backoff_interval_query: AtomicU64,
 }
 
 impl MdnsService {
-    /// Sets up a multicast UDP socket for mDNS communication.
+    // ===========================
+    // Setup the multicast UDP socket for mDNS communication.
+    // - Creates a UDP socket using the socket2 crate.
+    // - Sets reuse options and binds to the appropriate address/port.
+    // - Joins the mDNS multicast group at 224.0.0.251:5353.
+    // ===========================
     async fn setup_multicast_socket() -> Result<UdpSocket, MdnsError> {
         let multicast_addr = Ipv4Addr::new(224, 0, 0, 251);
         let local_addr = Ipv4Addr::UNSPECIFIED;
         let port = 5353;
 
+        // Create a new IPv4 UDP socket.
         let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))
             .map_err(MdnsError::NetworkError)?;
+        // Allow multiple sockets to bind to the same address.
         socket
             .set_reuse_address(true)
             .map_err(MdnsError::NetworkError)?;
@@ -40,11 +55,14 @@ impl MdnsService {
             .set_reuse_port(true)
             .map_err(MdnsError::NetworkError)?;
 
+        // Bind to the local address and port.
         socket
             .bind(&SocketAddr::V4(SocketAddrV4::new(local_addr, port)).into())
             .map_err(MdnsError::NetworkError)?;
 
+        // Convert the socket2 socket into a Tokio UdpSocket.
         let udp_socket = UdpSocket::from_std(socket.into()).map_err(MdnsError::NetworkError)?;
+        // Join the multicast group.
         udp_socket
             .join_multicast_v4(multicast_addr, local_addr)
             .map_err(MdnsError::NetworkError)?;
@@ -56,11 +74,15 @@ impl MdnsService {
         Ok(udp_socket)
     }
 
-    /// Creates a new mDNS service instance. We also register a default node service so that
-    /// the node is always discoverable by at least one service type.
+    // ===========================
+    // Create a new instance of MdnsService.
+    // - Sets up the multicast socket.
+    // - Initializes the registry, event channel, and default parameters.
+    // - Registers the compulsory default node service.
+    // ===========================
     pub async fn new(
         origin: Option<String>,
-        default_service_type: &str, // user picks what the "compulsory" service type is
+        default_service_type: &str,
     ) -> Result<Arc<Self>, MdnsError> {
         let socket = Self::setup_multicast_socket().await?;
         let registry = MdnsRegistry::new();
@@ -74,17 +96,20 @@ impl MdnsService {
             default_service_type: default_service_type.to_string(),
             query_cache: Arc::new(Mutex::new(HashMap::new())),
             backoff_state: Arc::new(Mutex::new(BackoffState::Normal)),
-            backoff_interval_advertise: AtomicU64::new(5), // Start with a 5-second interval
-            backoff_interval_query: AtomicU64::new(5), // Start with a 5-second interval
+            backoff_interval_advertise: AtomicU64::new(5),
+            backoff_interval_query: AtomicU64::new(5),
         });
-
-        // [NEW] Register the default service for our local node:
         service.register_default_node_service().await?;
 
         Ok(service)
     }
 
-    /// Registers the *compulsory* "default" service for this node.
+    // ===========================
+    // Registers the compulsory "default" service for this node.
+    // - Retrieves the origin.
+    // - Constructs a default service record.
+    // - Adds it to the registry and links it to the node.
+    // ===========================
     pub async fn register_default_node_service(&self) -> Result<(), MdnsError> {
         let node_origin = {
             let origin_lock = self.origin.read().await;
@@ -93,29 +118,24 @@ impl MdnsService {
                 .unwrap_or_else(|| "UnknownOrigin.local".to_string())
         };
 
-        // e.g. "MyLaptop.local._mdnsnode._tcp.local."
         let default_id = format!(
             "{}.{}",
             node_origin.trim_end_matches('.'),
             self.default_service_type.trim_start_matches('.')
         );
 
-        // Construct the never-expiring default service
         let service_record = ServiceRecord {
             id: default_id.clone(),
             service_type: self.default_service_type.clone(),
-            port: 5353,          // or a relevant port
-            ttl: Some(u32::MAX), // never expires
+            port: 5353,         // Use standard mDNS port.
+            ttl: Some(u32::MAX), // A high TTL to indicate a long-lived record.
             origin: node_origin.clone(),
             priority: Some(0),
             weight: Some(0),
             node_id: node_origin.clone(),
         };
 
-        // Add the service to the registry
         self.registry.add_service(service_record.clone()).await?;
-
-        // Also ensure the node record exists and references this service
         self.link_service_to_node(&service_record).await?;
 
         println!(
@@ -125,14 +145,19 @@ impl MdnsService {
         Ok(())
     }
 
-    /// Public helper to retrieve a broadcast receiver for events.
+    // ===========================
+    // Returns a new event receiver subscribing to mDNS events.
+    // ===========================
     pub fn get_event_receiver(&self) -> broadcast::Receiver<MdnsEvent> {
         self.event_sender.subscribe()
     }
 
-    /// Registers a local ephemeral (non-default) service to the registry.
-    ///
-    /// Also updates the node so that `NodeRecord.services` contains this service ID.
+    // ===========================
+    // Registers a local service.
+    // - Constructs a service record from the provided parameters.
+    // - Adds the record to the registry and links it to the node.
+    // - Notifies listeners via the event channel.
+    // ===========================
     pub async fn register_local_service(
         &self,
         id: String,
@@ -153,11 +178,8 @@ impl MdnsService {
         };
 
         self.registry.add_service(service.clone()).await?;
-
-        // Link the service to the node
         self.link_service_to_node(&service).await?;
 
-        // Optionally, broadcast an event
         let _ = self
             .event_sender
             .send(MdnsEvent::Discovered(DnsRecord::SRV {
@@ -172,15 +194,16 @@ impl MdnsService {
         Ok(())
     }
 
-    /// [NEW] Updates the NodeRecord in the registry so that it includes the given service's ID.
-    /// If the node doesn't exist, we create it; if it does, we add the service ID to the list.
+    // ===========================
+    // Links a given service record to its corresponding node record.
+    // - If the node does not exist, a new one is created with a default IP.
+    // - Otherwise, the service is added to the node's list if not already present.
+    // ===========================
     async fn link_service_to_node(&self, service: &ServiceRecord) -> Result<(), MdnsError> {
-        // Find or create the NodeRecord
         let node_id = service.node_id.trim_end_matches('.').to_string();
 
         let mut node_opt = self.registry.get_node(&node_id).await;
         if node_opt.is_none() {
-            // Node doesn't exist yet, create it
             node_opt = Some(NodeRecord {
                 id: node_id.clone(),
                 ip_address: "0.0.0.0".to_string(),
@@ -190,18 +213,20 @@ impl MdnsService {
         }
 
         if let Some(mut node) = node_opt {
-            // Add this service ID if it's not already in the node's list
             if !node.services.contains(&service.id) {
                 node.services.push(service.id.clone());
             }
-            // Update the node record in the registry
             self.registry.add_node(node).await?;
         }
 
         Ok(())
     }
 
-    /// Creates an mDNS "advertise" packet with all services registered under this node.
+    // ===========================
+    // Creates an mDNS advertisement packet containing PTR, SRV, and A records.
+    // - Retrieves local services from the registry.
+    // - Determines the local IP address using a helper function.
+    // ===========================
     pub async fn create_advertise_packet(&self) -> Result<DnsPacket, MdnsError> {
         let origin = {
             let origin_lock = self.origin.read().await;
@@ -212,7 +237,8 @@ impl MdnsService {
 
         let services = self.registry.list_services_by_node(&origin).await;
         let mut packet = DnsPacket::new();
-        packet.flags = 0x8400; // Set response flags
+        // Set response flags.
+        packet.flags = 0x8400;
 
         let local_ip = get_local_ipv4()
             .ok_or_else(|| MdnsError::Generic("Failed to get local IP".to_string()))?;
@@ -223,12 +249,14 @@ impl MdnsService {
             for service in services {
                 println!("(ADVERTISE) Including service in packet: {:?}", service);
 
+                // PTR record for service type.
                 packet.answers.push(DnsRecord::PTR {
                     name: DnsName::new(&service.service_type).unwrap(),
                     ttl: service.ttl.unwrap_or(120),
                     ptr_name: DnsName::new(&service.id).unwrap(),
                 });
 
+                // SRV record pointing to the origin.
                 packet.answers.push(DnsRecord::SRV {
                     name: DnsName::new(&service.id).unwrap(),
                     ttl: service.ttl.unwrap_or(120),
@@ -238,6 +266,7 @@ impl MdnsService {
                     target: DnsName::new(&origin).unwrap(),
                 });
 
+                // A record with the local IP.
                 packet.answers.push(DnsRecord::A {
                     name: DnsName::new(&service.origin).unwrap(),
                     ttl: service.ttl.unwrap_or(120),
@@ -249,10 +278,13 @@ impl MdnsService {
         Ok(packet)
     }
 
-    /// Sends an mDNS packet over the network to the multicast address.
+    // ===========================
+    // Sends a serialized DNS packet to the mDNS multicast address.
+    // ===========================
     pub async fn send_packet(&self, packet: &DnsPacket) -> Result<(), MdnsError> {
         let bytes = packet.serialize();
-        let multicast_addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(224, 0, 0, 251), 5353));
+        let multicast_addr =
+            SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(224, 0, 0, 251), 5353));
 
         self.socket
             .send_to(&bytes, multicast_addr)
@@ -262,19 +294,23 @@ impl MdnsService {
         Ok(())
     }
 
-    /// Periodically sends a PTR query for the given service type.
+    // ===========================
+    // Periodically sends out queries for a given service type.
+    // - Uses backoff intervals and debouncing logic.
+    // ===========================
     pub async fn periodic_query(&self, service_type: &str) {
         loop {
             let current_query_interval = self.backoff_interval_query.load(Ordering::Relaxed);
-    
+
             let mut packet = DnsPacket::new();
+            // Standard query flags (all bits cleared).
             packet.flags = 0x0000;
             packet.questions.push(crate::DnsQuestion {
                 qname: DnsName::new(service_type).unwrap(),
-                qtype: 12, // PTR
+                qtype: 12, // PTR record query.
                 qclass: 1,
             });
-    
+
             if let Err(err) = self.send_packet(&packet).await {
                 eprintln!("(QUERY) Failed to send periodic query: {:?}", err);
             } else {
@@ -283,43 +319,31 @@ impl MdnsService {
                     service_type, current_query_interval
                 );
             }
-    
-            // Adjust backoff state dynamically
+
             self.adjust_backoff_state().await;
-    
+
             tokio::time::sleep(Duration::from_secs(current_query_interval)).await;
         }
     }
 
-    /// Advertises all local services (including the default service) as unsolicited mDNS responses.
-    #[deprecated]
-    pub async fn old_advertise_services(&self) -> Result<(), MdnsError> {
-        let packet = self.create_advertise_packet().await?;
-        if packet.answers.is_empty() {
-            println!("(ADVERTISE) No answers in the mDNS packet.");
-        } else {
-            println!(
-                "(ADVERTISE) Sending mDNS packet with {} answers.",
-                packet.answers.len()
-            );
-        }
-        self.send_packet(&packet).await
-    }
-
-    /// Starts adaptive advertisement with exponential backoff.
+    // ===========================
+    // Advertises local services at adaptive intervals.
+    // - Runs as a background task.
+    // - Adjusts backoff state dynamically after each advertisement.
+    // ===========================
     pub async fn advertise_services(self: Arc<Self>) -> Result<(), MdnsError> {
         tokio::spawn(async move {
             loop {
                 {
                     let state = self.backoff_state.lock().await.clone();
                     let current_interval = self.backoff_interval_advertise.load(Ordering::Relaxed);
-        
+
                     println!(
                         "(ADVERTISE) Current state: {:?}, Interval: {}s",
                         state, current_interval
                     );
                 }
-        
+
                 if let Ok(packet) = self.create_advertise_packet().await {
                     if !packet.answers.is_empty() {
                         if let Err(err) = self.send_packet(&packet).await {
@@ -333,21 +357,24 @@ impl MdnsService {
                     eprintln!("(ADVERTISE) Failed to create packet.");
                     return Err(MdnsError::Generic("Failed to create mDNS packet".to_string()));
                 }
-        
-                // Adjust backoff state dynamically
+
+                // Adjust backoff state dynamically.
                 self.adjust_backoff_state().await;
-        
+
                 tokio::time::sleep(Duration::from_secs(
-                    self.backoff_interval_advertise.load(Ordering::Relaxed)
+                    self.backoff_interval_advertise.load(Ordering::Relaxed),
                 ))
                 .await;
             }
         });
-    
+
         Ok(())
     }
-    
-    /// Core loop listening for incoming mDNS packets and processing them.
+
+    // ===========================
+    // Listens for incoming mDNS packets and dispatches them to the appropriate handler.
+    // - Differentiates between query and response packets.
+    // ===========================
     pub async fn listen(&self) -> Result<(), MdnsError> {
         let mut buf = [0; 4096];
         loop {
@@ -370,7 +397,9 @@ impl MdnsService {
         }
     }
 
-    /// Periodically logs all nodes in the registry (debugging).
+    // ===========================
+    // Periodically prints the current node registry.
+    // ===========================
     pub async fn print_node_registry(&self) {
         loop {
             time::sleep(Duration::from_secs(10)).await;
@@ -378,14 +407,20 @@ impl MdnsService {
             println!("(NODE REGISTRY) Nodes: {:?}", nodes);
         }
     }
+
+    // ===========================
+    // Adjusts the backoff intervals based on the current backoff state.
+    // - Supports Normal, Backoff, Recovery, and Stable states.
+    // - Ensures that the query interval is not more than twice the advertise interval.
+    // ===========================
     pub async fn adjust_backoff_state(&self) {
         let state = self.backoff_state.lock().await;
         let current_advertise_interval = self.backoff_interval_advertise.load(Ordering::Relaxed);
         let current_query_interval = self.backoff_interval_query.load(Ordering::Relaxed);
-    
+
         match *state {
             BackoffState::Normal => {
-                self.backoff_interval_advertise.store(5, Ordering::Relaxed); // Default interval
+                self.backoff_interval_advertise.store(5, Ordering::Relaxed);
                 self.backoff_interval_query.store(5, Ordering::Relaxed);
             }
             BackoffState::Backoff => {
@@ -405,62 +440,67 @@ impl MdnsService {
                 self.backoff_interval_query.store(10, Ordering::Relaxed);
             }
         }
-    
-        // 🔹 Ensure query interval never exceeds 2× advertise interval
+
         let adjusted_query_interval = self.backoff_interval_query.load(Ordering::Relaxed);
         let adjusted_advertise_interval = self.backoff_interval_advertise.load(Ordering::Relaxed);
-    
+
         if adjusted_query_interval > 2 * adjusted_advertise_interval {
-            self.backoff_interval_query.store(2 * adjusted_advertise_interval, Ordering::Relaxed);
+            self.backoff_interval_query
+                .store(2 * adjusted_advertise_interval, Ordering::Relaxed);
         }
-    
+
         println!(
             "(BACKOFF) Adjusted state: {:?}, New advertise interval: {}s, New query interval: {}s",
             *state, adjusted_advertise_interval, adjusted_query_interval
         );
     }
-    /// Spawns tasks: (1) periodically advertise, (2) periodically query, (3) listen, (4) debug-print.
-    pub async fn run(
-        self: &Arc<Self>,
-        query_service_type: String,
-    ) {
+
+    // ===========================
+    // Runs the MdnsService by launching all main tasks:
+    // - Advertisement, periodic query, listening, and registry printing.
+    // ===========================
+    pub async fn run(self: &Arc<Self>, query_service_type: String) {
         let advertise_service = Arc::clone(self);
         let query_service = Arc::clone(self);
         let listen_service = Arc::clone(self);
         let registry_service = Arc::clone(self);
-    
-        // Start adaptive advertisement in a background task
+
+        // Start adaptive advertisement in a background task.
         tokio::spawn(advertise_service.clone().advertise_services());
-    
-        // Adaptive Periodic Query
+
+        // Start adaptive periodic query.
         tokio::spawn(async move {
             query_service
                 .periodic_query(&query_service_type)
                 .await;
         });
-    
-        // Listen loop
+
+        // Start the listen loop.
         tokio::spawn(async move {
             if let Err(err) = listen_service.listen().await {
                 eprintln!("(LISTEN) Error: {:?}", err);
             }
         });
-    
-        // Print registry periodically
+
+        // Periodically print the node registry.
         tokio::spawn(async move {
             registry_service.print_node_registry().await;
         });
     }
 
-    /// Process a response packet: see if it has A/SRV records, update registry accordingly.
+    // ===========================
+    // Processes an incoming response packet.
+    // - Handles A records (for node IP discovery) and SRV records (for service discovery).
+    // - Updates the registry and emits events accordingly.
+    // ===========================
     pub async fn process_response(&self, packet: &DnsPacket, src: &SocketAddr) {
         println!("Packet : {:?}", packet);
 
-        // If it's IPv4
+        // If the source is IPv4.
         if let SocketAddr::V4(src_addr) = src {
             for answer in &packet.answers {
                 match answer {
-                    // If there's an A record => we discover a node's IP
+                    // Handle A records to discover node IP addresses.
                     DnsRecord::A { name, ip, ttl } => {
                         let ip_address = Ipv4Addr::new(ip[0], ip[1], ip[2], ip[3]);
                         println!(
@@ -470,7 +510,7 @@ impl MdnsService {
                             src_addr.ip()
                         );
 
-                        // Add/Update node
+                        // Update or add the node to the registry.
                         if let Err(e) = self
                             .add_node_to_registry(
                                 &name.to_string(),
@@ -482,13 +522,13 @@ impl MdnsService {
                             eprintln!("(DISCOVERY) Failed to add node: {:?}", e);
                         }
 
-                        // Send an event
+                        // Send a discovery event.
                         let _ = self
                             .event_sender
                             .send(MdnsEvent::Discovered(answer.clone()));
                     }
 
-                    // [NEW] If there's an SRV record => we discover a node's service
+                    // Handle SRV records to discover services.
                     DnsRecord::SRV {
                         name,
                         ttl,
@@ -501,16 +541,13 @@ impl MdnsService {
                             "(DISCOVERY) Discovered service: {} => node: {}, port: {}",
                             name, target, port
                         );
-                        // Example: name = "MyLaptop.local._myDefault._tcp.local."
-                        // target = "MyLaptop.local."
 
-                        // We'll create a ServiceRecord that matches this SRV
                         let srv_id = name.to_string();
                         let srv_origin = target.to_string().trim_end_matches('.').to_string();
 
                         let service_record = ServiceRecord {
                             id: srv_id.clone(),
-                            service_type: extract_service_type(&srv_id), // see helper below
+                            service_type: extract_service_type(&srv_id),
                             port: *port,
                             ttl: Some(*ttl),
                             origin: srv_origin.clone(),
@@ -519,34 +556,34 @@ impl MdnsService {
                             node_id: srv_origin.clone(),
                         };
 
-                        // Add that to our registry
+                        // Add the service to our registry.
                         if let Err(e) = self.registry.add_service(service_record.clone()).await {
                             eprintln!("(DISCOVERY) Failed to add service: {:?}", e);
                         } else {
-                            // Link it to the node
+                            // Link the service to the node.
                             if let Err(e) = self.link_service_to_node(&service_record).await {
                                 eprintln!("(DISCOVERY) Failed to link service to node: {:?}", e);
                             }
                         }
 
-                        // Optional event
                         let _ = self
                             .event_sender
                             .send(MdnsEvent::Discovered(answer.clone()));
                     }
-
-                    // Others (e.g. PTR, AAAA, etc.)
                     _ => {}
                 }
             }
         }
-
-        // After we process everything, print the updated registry
         let updated_nodes = self.registry.list_nodes().await;
         println!("(REGISTRY) Current nodes: {:?}", updated_nodes);
     }
 
-    /// Process a query packet: see if we have a matching service type, respond accordingly.
+    // ===========================
+    // Processes an incoming query packet.
+    // - Debounces duplicate queries.
+    // - Searches for matching services in the registry.
+    // - Batches responses with a slight delay.
+    // ===========================
     pub async fn process_query(&self, packet: &DnsPacket, src: &SocketAddr) {
         let mut cache = self.query_cache.lock().await;
         let now = current_timestamp();
@@ -555,7 +592,7 @@ impl MdnsService {
             if question.qtype == 12 && question.qclass == 1 {
                 let requested_service = question.qname.labels.join(".");
 
-                // **Debounce check: Ignore duplicate queries received within 500ms**
+                // Debounce check: Ignore duplicate queries received within 500ms.
                 if let Some(last_time) = cache.get(&requested_service) {
                     if now - *last_time < 500 {
                         println!(
@@ -566,13 +603,13 @@ impl MdnsService {
                     }
                 }
 
-                // Update query timestamp
+                // Update query timestamp.
                 cache.insert(requested_service.clone(), now);
 
                 println!("Requested Service : {}", requested_service);
                 let all_services = self.registry.list_services().await;
 
-                // Find all services whose `id` ends with the requested service
+                // Find services whose IDs end with the requested service name.
                 let matching_services: Vec<_> = all_services
                     .into_iter()
                     .filter(|s| {
@@ -596,7 +633,7 @@ impl MdnsService {
                         .unwrap_or_else(|| "UnknownOrigin.local".to_string())
                 };
 
-                // Build answers
+                // Build DNS answers for each matching service.
                 for service in matching_services {
                     response_packet.answers.push(DnsRecord::PTR {
                         name: DnsName::new(&service.service_type).unwrap(),
@@ -622,10 +659,9 @@ impl MdnsService {
                     }
                 }
 
-                // **Introduce a slight delay (200ms) to batch responses**
+                // Introduce a slight delay (200ms) to batch responses.
                 let response_clone = response_packet.clone();
-                let _self_arc = Arc::new(self); // Clone `self` properly
-                let socket = Arc::clone(&self.socket); // Clone socket reference for async task
+                let socket = Arc::clone(&self.socket); // Clone socket reference.
                 let multicast_addr =
                     SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(224, 0, 0, 251), 5353));
 
@@ -642,7 +678,11 @@ impl MdnsService {
         }
     }
 
-    /// Adds or updates a NodeRecord in the registry. (Mostly used for discovered A records.)
+    // ===========================
+    // Adds or updates a node in the registry based on the provided id and IP address.
+    // - Checks for IP conflicts.
+    // - Updates existing nodes or creates a new one.
+    // ===========================
     async fn add_node_to_registry(
         &self,
         id: &str,
@@ -654,7 +694,7 @@ impl MdnsService {
 
         let mut nodes = self.registry.list_nodes().await;
 
-        // If there's a conflict
+        // Check for IP conflicts.
         if let Some(conflict) = nodes
             .iter()
             .find(|n| n.ip_address == ip_address && n.id != normalized_id)
@@ -665,19 +705,19 @@ impl MdnsService {
             )));
         }
 
-        // If it already exists, update IP if needed:
+        // Update the node if it already exists.
         if let Some(existing_node) = nodes.iter_mut().find(|n| n.id == normalized_id) {
             if existing_node.ip_address != ip_address {
                 existing_node.ip_address = ip_address.clone();
                 existing_node.ttl = ttl;
-                // re-save
+                // Re-save the updated node.
                 self.registry
                     .add_node(existing_node.clone())
                     .await
                     .map_err(|e| MdnsError::Generic(e.to_string()))?;
             }
         } else {
-            // Create new node
+            // Create and add a new node.
             println!(
                 "(DISCOVERY) Adding new node: {} with IP {}",
                 normalized_id, ip_address
@@ -699,10 +739,13 @@ impl MdnsService {
     }
 }
 
-/// Helper to get the local IPv4 address, e.g. 192.168.x.x
+/// ===========================
+/// Helper: Retrieves the local IPv4 address (e.g. 192.168.x.x).
+/// ===========================
 fn get_local_ipv4() -> Option<Ipv4Addr> {
     use std::net::{IpAddr, UdpSocket};
 
+    // Bind a UDP socket to an ephemeral port and connect to an external address.
     let socket = UdpSocket::bind("0.0.0.0:0").ok()?;
     socket.connect("8.8.8.8:80").ok()?;
     if let Ok(local_addr) = socket.local_addr() {
@@ -713,22 +756,23 @@ fn get_local_ipv4() -> Option<Ipv4Addr> {
     None
 }
 
-/// [NEW] Example function to derive "service type" from an SRV record's name, e.g.
-/// If `srv_id = "MyLaptop.local._myDefault._tcp.local."`,
-/// we parse out `_myDefault._tcp.local.` as the service type.
+/// ===========================
+/// Helper: Extracts the service type from an SRV record's name.
+/// For example, if `srv_id = "MyLaptop.local._myDefault._tcp.local."`,
+/// this function returns `_myDefault._tcp.local.`.
+/// ===========================
 fn extract_service_type(srv_id: &str) -> String {
-    // A simple approach: find the first dot from the left after the node portion.
-    // But many ways to do it. This is just an example logic.
+    // A simple approach: find the first occurrence of "._" and return the remainder.
     if let Some(pos) = srv_id.find("._") {
-        // return everything from that '.' onward
-        // e.g. "._myDefault._tcp.local."
         return srv_id[pos + 1..].to_string();
     }
-    // fallback
+    // Fallback: return the full string.
     srv_id.to_string()
 }
 
-/// Helper function to get current timestamp in milliseconds
+/// ===========================
+/// Helper: Returns the current timestamp in milliseconds.
+/// ===========================
 pub fn current_timestamp() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
