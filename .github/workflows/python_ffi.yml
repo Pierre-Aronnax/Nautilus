@@ -1,0 +1,50 @@
+name: Build & Test Python FFI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  build:
+    name: Build and Test on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Python & Dependencies
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Maturin (for Rust-Python bindings)
+        run: pip install maturin
+
+      - name: Build Python module
+        run: |
+          cd py/python_ffi
+          maturin build --release
+
+      - name: Run Tests
+        run: |
+          cd py/python_ffi
+          maturin develop
+          python -c "import nautilus_python_ffi; print('Python FFI module loaded successfully')"
+
+      - name: Upload Wheel Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-wheels
+          path: py/python_ffi/target/wheels/*.whl
