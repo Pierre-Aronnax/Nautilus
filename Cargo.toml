@@ -20,5 +20,5 @@ members = [
     "protocols/negotiation", 
     "security/authentication", 
     "protocols/handshake", 
-    "transport/udp", "protocols/tls", "protocols/ping", "protocols/kad", 
+    "transport/udp", "protocols/tls", "protocols/ping", "protocols/kad", "py/python_ffi", 
     ]
