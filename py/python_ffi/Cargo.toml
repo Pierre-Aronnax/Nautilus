@@ -6,12 +6,22 @@ edition = "2021"
 [dependencies]
 pyo3 = { version = "0.23.4", features = ["extension-module"] }
 
+[dependencies.identity]
+path = "../../identity"
+default-features = false  # Ensure default features are OFF
+
+[features]
+default = ["dilithium", "ecdsa", "ed25519", "falcon", "kyber", "secp256k1", "pki_rsa", "spincs"]
+
+dilithium = ["identity/dilithium"]
+ecdsa = ["identity/ecdsa"]
+ed25519 = ["identity/ed25519"]
+falcon = ["identity/falcon"]
+kyber = ["identity/kyber"]
+secp256k1 = ["identity/secp256k1"]
+pki_rsa = ["identity/pki_rsa"]
+spincs = ["identity/spincs"]
 
 [lib]
 name = "python_ffi"
 crate-type = ["cdylib"]
-
-
-[dependencies.identity]
-path = "../../identity"
-features = ["dilithium"]
