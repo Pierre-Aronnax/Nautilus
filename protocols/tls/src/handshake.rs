@@ -19,7 +19,7 @@ use tokio::sync::Mutex;
 // If you don’t actually use `DecapsKey`, remove or comment:
 // use fips203::ml_kem_1024::DecapsKey;
 // --------------------------------------------------------
-
+//TODO Change HELLO -> HELLO-KYBER
 // use sha3::{Sha3_256, Digest}; // remove or comment if not used
 
 #[derive(Debug, Clone, Copy)]
@@ -191,6 +191,7 @@ impl HandshakeStep for KyberExchangeStep {
             match self.role {
                 HandshakeRole::Initiator => {
                     // Generate key pair
+                    println!("\x1b[31m[Kyber Request Initialized]\x1b[0m");
                     let (public_key, private_key) = KG::try_keygen().map_err(|e| {
                         HandshakeError::Generic(format!("Key generation failed: {}", e))
                     })?;
@@ -240,11 +241,13 @@ impl HandshakeStep for KyberExchangeStep {
                         guard.set_session_key(sk_bytes.to_vec());
                     }
 
-                    println!("[Initiator] Shared key established");
+                    println!("[Initiator] Kyber Shared key established");
                     Ok(vec![]) 
                 }
 
                 HandshakeRole::Responder => {
+                    println!("\x1b[32m[Kyber Response Initialized]\x1b[0m");
+
                     // Receive public key
                     println!("[Responder] Waiting for public key");
                     let mut buf = vec![0u8; 1568]; // Expected public key size for Kyber
@@ -284,7 +287,8 @@ impl HandshakeStep for KyberExchangeStep {
                         guard.set_session_key(sk_bytes.to_vec());
                     }
 
-                    println!("[Responder] Shared key established");
+                    println!("\x1b[35m[Responder] Kyber Completed - Shared key established\x1b[0m");
+
                     Ok(vec![])
                 }
                 HandshakeRole::Unknown => {
