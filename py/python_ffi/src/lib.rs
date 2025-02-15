@@ -20,7 +20,7 @@ use identity::RSAkeyPair;
 use identity::SPHINCSKeyPair;
 
 #[pymodule]
-fn python_ffi(m: &Bound<'_, PyModule>) -> PyResult<()> {
+fn nautilus_pki(m: &Bound<'_, PyModule>) -> PyResult<()> {
     #[cfg(feature = "dilithium")]
     m.add_class::<PyDilithiumKeyPair>()?;
     #[cfg(feature = "ecdsa")]

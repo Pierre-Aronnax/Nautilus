@@ -2022,6 +2022,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "nautilus_pki"
+version = "0.0.1"
+dependencies = [
+ "identity",
+ "pyo3",
+]
+
+[[package]]
 name = "negotiation"
 version = "0.1.0"
 dependencies = [
@@ -2468,14 +2476,6 @@ dependencies = [
  "pyo3-build-config",
  "quote",
  "syn",
-]
-
-[[package]]
-name = "python_ffi"
-version = "0.1.0"
-dependencies = [
- "identity",
- "pyo3",
 ]
 
 [[package]]

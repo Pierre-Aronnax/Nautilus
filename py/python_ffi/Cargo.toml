@@ -1,6 +1,6 @@
 [package]
-name = "python_ffi"
-version = "0.1.0"
+name = "nautilus_pki"
+version = "0.0.1"
 edition = "2021"
 
 [dependencies]
@@ -8,7 +8,7 @@ pyo3 = { version = "0.23.4", features = ["extension-module"] }
 
 [dependencies.identity]
 path = "../../identity"
-default-features = false  # Ensure default features are OFF
+default-features = false
 
 [features]
 default = ["dilithium", "ecdsa", "ed25519", "falcon", "kyber", "secp256k1", "pki_rsa", "spincs"]
@@ -23,5 +23,5 @@ pki_rsa = ["identity/pki_rsa"]
 spincs = ["identity/spincs"]
 
 [lib]
-name = "python_ffi"
+name = "nautilus_pki"
 crate-type = ["cdylib"]
