@@ -10,6 +10,7 @@ use fips205::traits::{SerDes, Signer, Verifier};
 
 // ======================= SPHINCS+ Key Pair Definition =======================
 #[cfg(feature = "spincs")]
+#[deprecated(since = "1.0.0", note = "SPHINCS+ is under beta testing and may be unstable. Use at your own risk.")]
 #[derive(Clone)]
 pub struct SPHINCSKeyPair {
     pub private_key: PrivateKey,

@@ -185,3 +185,48 @@ mod tests {
         assert!(result.is_err(), "Verification should fail for invalid signature format");
     }
 }
+
+
+#[cfg(test)]
+#[cfg(feature = "falcon")]
+mod serialization_tests {
+    use pqcrypto_falcon::falcon512::keypair;
+    use identity::{KeySerialization,FalconKeyPair};
+    use pqcrypto_traits::sign::{SecretKey,PublicKey};
+    #[test]
+    fn test_falcon_serialization() {
+        // Generate a new key pair
+        let (public_key, secret_key) = keypair();
+        let keypair = FalconKeyPair { public_key, secret_key };
+
+        // Serialize the key pair
+        let serialized = keypair.to_bytes();
+        assert!(!serialized.is_empty(), "Serialized output should not be empty");
+
+        // Deserialize back
+        let deserialized = FalconKeyPair::from_bytes(&serialized);
+        assert!(deserialized.is_ok(), "Deserialization should be successful");
+
+        let deserialized_keypair = deserialized.unwrap();
+
+        // Ensure public and private keys match
+        assert_eq!(
+            keypair.public_key.as_bytes(),
+            deserialized_keypair.public_key.as_bytes(),
+            "Public keys do not match after serialization"
+        );
+
+        assert_eq!(
+            keypair.secret_key.as_bytes(),
+            deserialized_keypair.secret_key.as_bytes(),
+            "Private keys do not match after serialization"
+        );
+    }
+
+    #[test]
+    fn test_invalid_falcon_deserialization() {
+        let invalid_bytes = vec![0u8; 100]; // Invalid size
+        let result = FalconKeyPair::from_bytes(&invalid_bytes);
+        assert!(result.is_err(), "Deserialization should fail with incorrect input size");
+    }
+}

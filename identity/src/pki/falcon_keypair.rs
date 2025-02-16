@@ -2,7 +2,7 @@
 // identity\src\pki\falcon_keypair.rs
 
 #[cfg(feature = "falcon")]
-use crate::{PKIError, PKITraits};
+use crate::{PKIError, PKITraits,KeySerialization};
 #[cfg(feature = "falcon")]
 use pqcrypto_falcon::falcon512::*;
 #[cfg(feature = "falcon")]
@@ -54,6 +54,46 @@ impl PKITraits for FalconKeyPair {
     /// Retrieves the key type.
     fn key_type() -> String {
         "Falcon".to_string()
+    }
+}
+// ======================= Key Serialization Implmentation ====================
+#[cfg(feature = "falcon")]
+impl KeySerialization for FalconKeyPair {
+    fn to_bytes(&self) -> Vec<u8> {
+        let public_key_bytes = self.public_key.clone().as_bytes().to_vec();
+        let private_key_bytes = self.secret_key.clone().as_bytes().to_vec();
+        
+        [public_key_bytes, private_key_bytes].concat()
+    }
+
+    fn from_bytes(bytes: &[u8]) -> Result<Self, PKIError>
+    where
+        Self: Sized,
+    {
+        const PUBLIC_KEY_LEN: usize = 897;
+        const PRIVATE_KEY_LEN: usize = 1281;
+        const TOTAL_KEY_LEN: usize = PUBLIC_KEY_LEN + PRIVATE_KEY_LEN;
+
+        if bytes.len() != TOTAL_KEY_LEN {
+            return Err(PKIError::InvalidKey(format!(
+                "Invalid Falcon key length. Expected {}, got {}",
+                TOTAL_KEY_LEN,
+                bytes.len()
+            )));
+        }
+
+        let (public_key_bytes, private_key_bytes) = bytes.split_at(PUBLIC_KEY_LEN);
+
+        let public_key = pqcrypto_falcon::falcon512::PublicKey::from_bytes(public_key_bytes)
+            .map_err(|_| PKIError::InvalidKey("Invalid Falcon public key".to_string()))?;
+
+        let secret_key = pqcrypto_falcon::falcon512::SecretKey::from_bytes(private_key_bytes)
+            .map_err(|_| PKIError::InvalidKey("Invalid Falcon private key".to_string()))?;
+
+        Ok(Self {
+            public_key,
+            secret_key,
+        })
     }
 }
 // ================== Additional Methods ======================================
