@@ -201,27 +201,27 @@ impl MdnsService {
     // ===========================
     async fn link_service_to_node(&self, service: &ServiceRecord) -> Result<(), MdnsError> {
         let node_id = service.node_id.trim_end_matches('.').to_string();
-
+    
         let mut node_opt = self.registry.get_node(&node_id).await;
         if node_opt.is_none() {
             node_opt = Some(NodeRecord {
                 id: node_id.clone(),
-                ip_address: "0.0.0.0".to_string(),
+                ip_addresses: Vec::new(),
                 ttl: service.ttl,
                 services: Vec::new(),
             });
         }
-
+    
         if let Some(mut node) = node_opt {
             if !node.services.contains(&service.id) {
                 node.services.push(service.id.clone());
             }
             self.registry.add_node(node).await?;
         }
-
+    
         Ok(())
     }
-
+    
     // ===========================
     // Creates an mDNS advertisement packet containing PTR, SRV, and A records.
     // - Retrieves local services from the registry.
@@ -497,37 +497,49 @@ impl MdnsService {
         println!("Packet : {:?}", packet);
 
         // If the source is IPv4.
-        if let SocketAddr::V4(src_addr) = src {
+        if let SocketAddr::V4(_src_addr) = src {
             for answer in &packet.answers {
                 match answer {
                     // Handle A records to discover node IP addresses.
                     DnsRecord::A { name, ip, ttl } => {
-                        let ip_address = Ipv4Addr::new(ip[0], ip[1], ip[2], ip[3]);
+                        // IP from the DNS record:
+                        let record_ip = Ipv4Addr::new(ip[0], ip[1], ip[2], ip[3]).to_string();
+                    
+                        // The node name/ID
+                        let node_id = name.to_string();
+                    
                         println!(
-                            "(DISCOVERY) Discovered node: {} -> {} <=> {}",
-                            name,
-                            ip_address,
-                            src_addr.ip()
+                            "(DISCOVERY) Discovered node: {} with A record IP: {}",
+                            node_id, record_ip
                         );
-
-                        // Update or add the node to the registry.
-                        if let Err(e) = self
-                            .add_node_to_registry(
-                                &name.to_string(),
-                                &src_addr.ip().to_string(),
-                                Some(*ttl),
-                            )
-                            .await
-                        {
-                            eprintln!("(DISCOVERY) Failed to add node: {:?}", e);
+                    
+                        // Fetch or create a NodeRecord with multiple IP support
+                        let mut node = self.registry.get_node(&node_id).await.unwrap_or_else(|| NodeRecord {
+                            id: node_id.clone(),
+                            ip_addresses: Vec::new(), // For multiple IP addresses
+                            ttl: Some(*ttl),
+                            services: Vec::new(),
+                        });
+                    
+                        // Add the new IP if not already present
+                        if !node.ip_addresses.contains(&record_ip) {
+                            println!("(DISCOVERY) Adding new IP {} to node {}", record_ip, node_id);
+                            node.ip_addresses.push(record_ip.clone());
+                    
+                            if let Err(e) = self.registry.add_node(node.clone()).await {
+                                eprintln!("(DISCOVERY) Failed to update node: {:?}", e);
+                            }
+                        } else {
+                            println!(
+                                "(DISCOVERY) Node {} already has IP {}. No update needed.",
+                                node_id, record_ip
+                            );
                         }
-
-                        // Send a discovery event.
-                        let _ = self
-                            .event_sender
-                            .send(MdnsEvent::Discovered(answer.clone()));
+                    
+                        // Fire a discovery event
+                        let _ = self.event_sender.send(MdnsEvent::Discovered(answer.clone()));
                     }
-
+                    
                     // Handle SRV records to discover services.
                     DnsRecord::SRV {
                         name,
@@ -676,66 +688,6 @@ impl MdnsService {
                 });
             }
         }
-    }
-
-    // ===========================
-    // Adds or updates a node in the registry based on the provided id and IP address.
-    // - Checks for IP conflicts.
-    // - Updates existing nodes or creates a new one.
-    // ===========================
-    async fn add_node_to_registry(
-        &self,
-        id: &str,
-        ip_address: &str,
-        ttl: Option<u32>,
-    ) -> Result<(), MdnsError> {
-        let normalized_id = id.trim_end_matches('.').to_string();
-        let ip_address = ip_address.to_string();
-
-        let mut nodes = self.registry.list_nodes().await;
-
-        // Check for IP conflicts.
-        if let Some(conflict) = nodes
-            .iter()
-            .find(|n| n.ip_address == ip_address && n.id != normalized_id)
-        {
-            return Err(MdnsError::Generic(format!(
-                "IP conflict: {} is already assigned to {}",
-                ip_address, conflict.id
-            )));
-        }
-
-        // Update the node if it already exists.
-        if let Some(existing_node) = nodes.iter_mut().find(|n| n.id == normalized_id) {
-            if existing_node.ip_address != ip_address {
-                existing_node.ip_address = ip_address.clone();
-                existing_node.ttl = ttl;
-                // Re-save the updated node.
-                self.registry
-                    .add_node(existing_node.clone())
-                    .await
-                    .map_err(|e| MdnsError::Generic(e.to_string()))?;
-            }
-        } else {
-            // Create and add a new node.
-            println!(
-                "(DISCOVERY) Adding new node: {} with IP {}",
-                normalized_id, ip_address
-            );
-
-            let new_node = NodeRecord {
-                id: normalized_id.clone(),
-                ip_address,
-                ttl,
-                services: Vec::new(),
-            };
-            self.registry
-                .add_node(new_node)
-                .await
-                .map_err(|e| MdnsError::Generic(e.to_string()))?;
-        }
-
-        Ok(())
     }
 }
 

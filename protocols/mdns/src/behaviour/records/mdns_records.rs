@@ -45,10 +45,11 @@ impl fmt::Display for ServiceRecord {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeRecord {
     pub id: String,
-    pub ip_address: String,
+    pub ip_addresses: Vec<String>,
     pub ttl: Option<u32>,
-    pub services: Vec<String>, // New field listing services offered by the node
+    pub services: Vec<String>,
 }
+
 
 impl Record for NodeRecord {
     fn identifier(&self) -> String {

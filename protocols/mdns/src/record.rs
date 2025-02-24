@@ -16,6 +16,12 @@ pub enum DnsRecord {
         ttl: u32,
         ip: [u8; 4],
     },
+    /// AAAA Record - Maps a name to an IPv6 address.
+    AAAA{
+        name : DnsName,
+        ttl : u32,
+        ip : [u8; 16],
+    },
     /// PTR Record - Maps a name to another name.
     PTR {
         name: DnsName,
@@ -54,6 +60,14 @@ impl DnsRecord {
                 buffer.extend_from_slice(&ttl.to_be_bytes());  // TTL
                 buffer.extend_from_slice(&4u16.to_be_bytes()); // RDLENGTH
                 buffer.extend_from_slice(ip);                 // RDATA (IPv4 address)
+            }
+            DnsRecord::AAAA { name, ttl, ip } => {
+                name.write(buffer);
+                buffer.extend_from_slice(&28u16.to_be_bytes()); // TYPE AAAA (28)
+                buffer.extend_from_slice(&1u16.to_be_bytes());  // CLASS IN (1)
+                buffer.extend_from_slice(&ttl.to_be_bytes());   // TTL
+                buffer.extend_from_slice(&16u16.to_be_bytes()); // RDLENGTH (16 bytes for IPv6)
+                buffer.extend_from_slice(ip);                   // RDATA (IPv6 address)
             }
             DnsRecord::PTR { name, ttl, ptr_name } => {
                 name.write(buffer);
@@ -123,6 +137,11 @@ impl DnsRecord {
                 let mut ip = [0u8; 4];
                 cursor.read_exact(&mut ip)?;
                 Ok(DnsRecord::A { name, ttl, ip })
+            }
+            28 => { // AAAA Record (IPv6)
+                let mut ip = [0u8; 16];
+                cursor.read_exact(&mut ip)?;
+                Ok(DnsRecord::AAAA { name, ttl, ip })
             }
             12 => { // PTR Record
                 let ptr_name = DnsName::parse(cursor)?;
